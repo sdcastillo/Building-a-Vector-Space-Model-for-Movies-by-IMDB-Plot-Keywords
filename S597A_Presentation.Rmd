@@ -1,0 +1,543 @@
+---
+title: "Movie Keyword Analysis: Building a Vector Space Model"
+subtitle: "STAT 597A: Statistical Computing"
+author: "Samuel Castillo"
+date: "April 25, 2017"
+fontsize: 9pt
+output: 
+  beamer_presentation:
+    theme: "AnnArbor"
+    colortheme: "dolphin"
+    fonttheme: "structurebold"
+---
+
+```{r setup, include=FALSE}
+options(warn=-1)
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r eval = T}
+#Libraries
+suppressMessages({
+  devtools::install_github("briatte/ggnet")
+library(png)
+library(GGally)
+library(ggplot2)
+library(stringr)
+library(plyr)
+library(statnet)
+library(lsa)
+library(parallel)
+library(network)
+library(sna)
+library(scales)
+library(RColorBrewer)
+devtools::install_github("hadley/multidplyr")
+
+
+library(tidyr)
+library(dplyr)#Load this LAST
+library(ggnet)
+})
+
+imdb = read.csv("imdb.csv", header = T, na.strings=c("","NA"))
+cpi = read.csv("cpi.csv", header = T)
+
+names(cpi) = c("year", "cpi")
+# imdb = na.omit(imdb)
+imdb = imdb %>% select(gross, genres, movie_title, country, movie_imdb_link, budget, title_year, imdb_score, content_rating, plot_keywords, actor_1_name, actor_2_name, actor_3_name , director_name)
+
+names(imdb) = c("gross", "genres", "title", "country","links", "budget", "year", "score", "rating", "keywords", "actor1", "actor2", "actor3", "director")
+
+# #cleaning up plot keywords
+imdb$keywords = as.character(imdb$keywords)
+imdb$keywords = strsplit(imdb$keywords, split = "|", fixed = TRUE) %>% as.list()
+
+#simplify the genres by taking the first entry
+imdb$genres = as.character(imdb$genres)
+imdb$genres_simple = strsplit(imdb$genres, split = "|", fixed = TRUE) 
+imdb$genres_simple = as.character(imdb$genres_simple)
+imdb$genres_simple = str_extract(imdb$genres, pattern = "^[A-Za-z]{1,20}")
+imdb$genres_simple = as.factor(imdb$genres_simple)
+imdb$title = gsub(imdb$title, pattern = "?", replacement ="")
+imdb$links = as.character(imdb$links)
+
+#Convert data types
+imdb$genres = as.factor(imdb$genres)
+imdb$budget = as.numeric(imdb$budget)
+imdb$gross = as.numeric(imdb$gross)
+imdb$score = as.numeric(imdb$score)
+imdb$rating = as.factor(imdb$rating)
+
+link_pat = '(.){35}'
+imdb$links = str_extract(imdb$links, pattern = link_pat)
+
+imdb = inner_join(imdb, cpi, by = "year")
+reference_year_cpi = filter(imdb, year ==2016)$cpi[1]
+imdb$gross_adj = reference_year_cpi / imdb$cpi
+
+imdb= imdb %>%
+  group_by(year) %>%
+  mutate(cpi_ratio=  reference_year_cpi/cpi) %>%
+  mutate(gross_adj = gross*cpi_ratio) %>%
+  mutate(budget_adj = budget*cpi_ratio) %>%
+  select(-gross, -budget) %>%
+  ungroup()
+
+get_links <- function(address) {
+  # read the movie page
+  page <- readLines(address)
+  # find the lines with the recommendations and strip the unneeded stuff
+  recs <- page[grep("rec_item", page)]
+  recs <- unlist(strsplit(recs, "data-tconst="))[seq(from = 2, to = 24, by = 2)]
+  # return the codes
+  recs <- paste("tt", gsub("[^0-9]", "", recs), sep = "")
+  
+  recs = paste("http://www.imdb.com/title/", recs, sep = "")
+  return(recs)
+}
+
+#Reuse vectorize
+n = imdb$keywords %>%
+  unlist()%>%
+  unique()%>%
+  length()
+
+#I create a list of all unique keywords to use for comparison
+unique_keywords = imdb$keywords %>% unlist() %>% unique()
+
+# n == length( unique_keywords)
+
+#Need an index number for each link to match
+vectorize = function(keywords_list){
+  #create a vector from the list
+  cur_keywords = keywords_list %>% unlist()
+  #initialize an empty vector
+  out = c(rep(0, n))
+  for(i in cur_keywords){
+        index = match(i, unique_keywords)
+        out[index] = 1
+    }
+  return(out)
+} 
+
+imdb$keyword_vectors = lapply( FUN = vectorize, X = imdb$keywords)
+
+closest_numeric_gen = function ( cur_vector){
+  
+  temp = imdb %>% select( title, keyword_vectors) 
+  
+  my_cos = function( list_vectors){
+    x = unlist( cur_vector)
+    y = unlist( list_vectors)
+    cosine(x,y)
+  }
+  
+  cosines= sapply( FUN = my_cos, temp$keyword_vectors)
+ 
+  return( cosines)
+}
+
+by_actor = imdb %>%
+  select( actor1, actor2, actor3, keyword_vectors)%>% 
+  gather(key = actor, keywords, actor1:actor3 )%>%
+  select( keyword_vectors, actor = keywords) %>%
+  ungroup()%>%
+  group_by(actor) %>%
+  summarise( keywords = list(Reduce("+", keyword_vectors)))
+
+names(by_actor) = c("actor", "keyword_vectors")
+
+#Which actors are most popular?
+df = imdb %>%
+  select( actor1, actor2, actor3, keyword_vectors)%>% 
+  gather(key = actor, keywords, actor1:actor3 )%>%
+  select( keyword_vectors, actor = keywords) %>%
+  group_by(actor) %>%
+  summarise(count = n()) %>%
+  arrange(desc(count))
+
+make_network = function(cur_data,
+                        cur_size = 3, 
+                        add.label = T, 
+                        cur_label_size = 2,
+                        cur_color = as.factor(cur_data$genres_simple)){
+      #Due to a restriction on RcolorBrewer, we can only use a max of 9 genres.
+    #Here I filter out all but the 9 most popular.  I do so only when necessary
+    if( length(unique( cur_data$genres_simple)) > 9) {
+    cur_data = filter( cur_data, ( genres_simple %in% c("Action",
+                                                "Adventure",
+                                                "Animation",
+                                                "Comedy",
+                                                "Crime",
+                                                "Drama",
+                                                "Fantasy",
+                                                "Horror",
+                                                "Biography")))
+    }
+    else{cur_data = cur_data}
+  
+    n = nrow(cur_data)
+    #Need an index number for each link to match
+    vectorize = function(input_links){
+      out = c(rep(0, n))
+      for(i in input_links){
+            index = match(i, cur_data$links)
+            out[index] = 1
+        }
+      return(out)
+    }
+   
+  each_links = sapply(cur_data$links, get_links)
+  links_matrix = ldply(each_links, vectorize) %>%
+    select(-1) %>%
+    as.matrix()
+  
+  # rownames(links_matrix) = 
+  net1 = network( links_matrix, directed = F, na.rm = F)
+ 
+  network.vertex.names(net1) = unlist(cur_data$title)
+  
+  length = nrow(links_matrix)
+  
+  
+  ggnet2(net1, 
+         color = cur_color, 
+         palette = "Set2",
+         label = add.label,
+         size = cur_size,
+         label.size = cur_label_size)
+    }
+```
+
+## A Math Problem
+
+**Frozen + The Expendables = **
+
+\hfill\break
+
+**Liam Neeson + Bruce Willis = **
+
+
+
+
+## Slide with Bullets
+
+How I tried to answer this question:
+
+- Use data from IMDB.com
+
+- Continue from the midterm with AWS
+
+- Network plots
+
+- Compare movies by plot keywords
+
+- Build a vector space model
+
+- Perform a dimensionality reduction
+
+## Plot Keywords Variable
+
+The Data was webscraped from IMDB.com and posted on Kaggle.  For each movie, there is a list of plot keywords.
+
+Tangled (2010)
+```{r include = T, echo = T, eval = T}
+imdb$keywords[7]
+```
+
+Pirates of the Caribbean At World's End (2007)
+```{r}
+imdb$keywords[2]
+```
+
+How can we compare these?
+
+##Cleaning the Data
+
+```{r  include = F, eval = F, echo = T}
+
+imdb$keywords = strsplit(imdb$keywords, split = "|", fixed = TRUE) %>% as.list()
+#Reuse vectorize
+n = imdb$keywords %>%
+  unlist()%>%
+  unique()%>%
+  length()
+#Create a list of all unique keywords to use for comparison
+unique_keywords = imdb$keywords %>% unlist() %>% unique()
+
+vectorize = function(keywords_list){
+  #create a vector from the list
+  cur_keywords = keywords_list %>% unlist()
+  #initialize an empty vector
+  out = c(rep(0, n))
+  for(i in cur_keywords){
+        index = match(i, unique_keywords)
+        out[index] = 1
+    }
+  return(out)
+} 
+```
+
+##Creating a Network
+
+Here I take a smalller sample at first to test the system using a filter of year > 2016.
+
+```{r eval = F, echo = T}
+mydata = filter(imdb, year >= 2016)
+dim(mydata)
+
+make_network(mydata)
+```
+
+45 movies is a good starting point.  This code below creates an adjacency matrix that is used for the network plot.  The i,jth entry is 1 if movie i is connected to movie j and zero otherwise.
+
+##Filtering to the Top 99% By Score
+
+```{r echo = T, eval = T, fig.width= 3, fig.height= 2}
+hist(imdb$score, main = "Distribution of IMDB Scores", cex.main = 0.5)
+quantile(imdb$score, probs = seq( 0.9, 1, 0.01))
+mydata2 = dplyr::filter( imdb, score >= 8.5)
+```
+
+
+##Plotting the Network
+
+Only those movies with score > 8.5.  These are the top 99%
+```{r}
+make_network(cur_data = mydata2)
+
+```
+
+##Tom Hanks Movies
+
+Only movies with Tom Hanks in the leading role.  Size is determined by imdb score.
+```{r}
+mydata3 = dplyr::filter(imdb, actor1 == "Tom Hanks")
+dim(mydata3)
+make_network(mydata3, cur_size = exp(mydata3$score))
+
+```
+
+
+
+##The Vector Space Model
+
+ -  Turn each set of keywords for a particular movie into a vector or zeros and ones
+ -  Add movies together to create a new vector
+ -  Assign a relational measure of how similar movies are
+ -  Find a third movie "closest" to the first two.
+
+##Defining Similarity
+
+Using cosine similarity:
+
+$$Sim(A, B) = cos(\theta) = \frac{A.B}{|A||B|}$$
+
+Using correlation:
+
+$$Sim( A, B) = r_{AB} = \frac{n \sum a_i b_i - \sum a_i \sum b_i}{\sqrt{n \sum a_i^2 - (\sum a_i)^2} \sqrt{n \sum{b_i^2} - (\sum{b_i})^2}}$$ 
+
+Using Euclidean Distance:
+
+$$Sim(A, B) = \sqrt{\sum (a_i - b_i)^2}$$
+
+##Example
+
+```{r}
+img <- readPNG("3d_word_space.PNG")
+grid::grid.raster(img)
+```
+
+##Finding the Closest Keyword Vectors
+```{r, include = T, echo= T, eval = T}
+#Now the "titles" are the actors names
+closest_numeric_actor = function ( cur_vector, titleA = NULL, titleB = NULL, dist = F){
+  temp = by_actor%>% filter(actor != titleA, actor!= titleB)
+  
+  my_cos = function( list_vectors){
+    x = unlist( cur_vector)
+    y = unlist( list_vectors)
+    cosine(x,y)
+  }
+  
+  euc.dist <- function(list_vectors) {
+    x1 = unlist( cur_vector)
+    x2 = unlist( list_vectors)
+    sqrt(sum((x1 - x2) ^ 2))}
+  
+  cur_function = my_cos
+  if( dist == T){cur_function = euc.dist}
+  
+  num_cores = detectCores()
+  relation = mclapply( FUN = cur_function, temp$keyword_vectors, mc.cores = num_cores)
+  temp$relation = relation
+  out = temp %>%
+    group_by(actor) %>%
+    arrange( desc( as.numeric(relation)))
+
+  return( out[1,]$actor)
+}
+```
+
+
+##Creating Networks with Similarity
+
+- tiff files
+
+##Defining Addition
+
+```{r eval = T, echo = T, include = T}
+actor_addition = function( titleA = NULL, titleB = NULL, dist = F){
+ actorA =  filter( by_actor, actor == titleA)
+ actorB = filter( by_actor, actor == titleB)
+ x = actorA$keyword_vectors %>% unlist()
+ y = actorB$keyword_vectors %>% unlist()
+ AplusB = x + y
+ result = closest_numeric_actor(AplusB, titleA, titleB, dist)
+ paste( titleA, " + ", titleB, " = " ,result)
+}
+
+actor_addition(by_actor$actor[1],by_actor$actor[1])
+```
+
+```{r include = F, eval = T}
+plot(df$count, type = "l", main = "Number of Movie Appearances per Actor")
+quantile(df$count)
+
+popular_actors = filter( df, count > 10)
+hist(popular_actors$count)
+all_actors = by_actor
+by_actor = filter( by_actor, actor %in% popular_actors$actor)
+```
+
+```{r }
+closest_numeric_gen = function ( cur_vector){
+  
+  temp = imdb %>% select( title, keyword_vectors) 
+  
+  my_cos = function( list_vectors){
+    x = unlist( cur_vector)
+    y = unlist( list_vectors)
+    cosine(x,y)
+  }
+  
+  cosines= sapply( FUN = my_cos, temp$keyword_vectors)
+ 
+  return( cosines)
+}
+
+#Create a connections matrix by applying this function over all 3733 movie plot keyword vectors
+
+myfun = function( df){ df$keyword_vectors %>% unlist()}
+
+myfun(all_actors$keyword_vectors[1])
+
+t1 = Sys.time()
+keyword_matrix = apply( FUN = myfun, X = all_actors, MARGIN = 1)
+t2 = Sys.time()
+t2 - t1
+```
+
+
+##A Shiny App
+
+https://sdcastillo.shinyapps.io/imdb_addition/
+
+\hfill\break
+
+**Output:**
+
+\hfill\break
+
+Frozen 
+ + 
+The Expendables 
+ = 
+The Chronicles of Narnia: The Lion, the Witch and the Wardrobe 
+
+
+Cosine of Angle:  0.282842712474619  
+Angle in Pi Radians:  0.408722554503086  
+Angle in Degrees:  73.5700598105554  
+
+
+##PCA
+
+We have a matrix with each row a keyword and each column an actor
+
+```{r include = T, eval = T, echo = T}
+n #Number of unique keywords
+dim(keyword_matrix)
+
+by_actor_matrix = keyword_matrix
+by_keyword = t(keyword_matrix) # rows are actors and columns are keywords
+```
+
+##PCA
+I examine both keywords and actors.
+```{r include = T, echo = T, eval = T}
+t11 = Sys.time()
+actor.pca = prcomp( by_actor_matrix, center = T, scale. = T)
+t21 = Sys.time()
+keyword.pca = prcomp( by_keyword, center = T, scale. = T)
+t21 - t11#Time using all 36 cores
+```
+
+Screenshot:
+
+```{r fig.width= 5, fig.height= 5}
+img <- readPNG("36_cores.PNG")
+grid::grid.raster(img)
+```
+
+
+##Interpretation of PCA
+
+```{r include = T, echo = T, eval = T, fig.width= 3, fig.height= 2}
+var_explained_actor = cumsum(actor.pca$sdev^2/sum(actor.pca$sdev^2))
+var_explained_keyword = cumsum(keyword.pca$sdev^2/sum(keyword.pca$sdev^2))
+
+```
+
+```{r eval = T, echo = F, fig.width= 3, fig.height= 3}
+plot(var_explained_actor[1:3000], type = "l", main = "Cum. % of Variance Explained by PCs", cex.main = 0.5, xlab = "Number of PCs")
+lines(var_explained_keyword[1:3000], type = "l", col = "green")
+
+```
+
+##Interpretation of PCA
+
+```{r include = T, echo = T, eval = T}
+var_explained_actor[1000]
+ncol(by_actor_matrix)
+
+var_explained_keyword[1000]
+
+```
+
+##Distribution of Keywords
+
+There are 7979 total unique keywords.  We can explain ~90% of the variance using linear combinations of 1000 keywords.
+```{r}
+all_keywords = imdb$keywords %>% unlist()
+w = table(all_keywords) %>% as.data.frame()
+quantile(w$Freq, probs = seq( 0.9, 1, 0.01))
+
+head(w %>% arrange(desc(Freq)), 10)
+
+```
+
+
+##Further Considerations
+
+ - Find correlation of principal components with actors or movies
+ - Include subtraction and or cross-product functions in Shiny App
+ - Find a way to predict the genre of a film based on keywords
+ 
+##Closing Thoughts
+
+- Free $100 AWS credits.  Google "AWS Educate"
+- Obligatory UGrid mention (ugrid.info)
+
+ 
