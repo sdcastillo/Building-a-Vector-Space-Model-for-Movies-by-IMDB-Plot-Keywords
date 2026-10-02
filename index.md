@@ -28,13 +28,15 @@ samwiki: true
 
 ## How a query is scored
 
-- **Vocabulary.** 8,086 distinct plot keywords from 5,043 films. Each film is a vertex of the unit hypercube in that dimension.
-- **Actor coordinate.** The number of lead credits whose keyword list contains that tag. Actors with at most ten such credits are left out.
-- **Cosine.** (x · y) / (‖x‖₂ ‖y‖₂). For binary films this is |K<sub>x</sub> ∩ K<sub>y</sub>| / √(|K<sub>x</sub>| |K<sub>y</sub>|). It is unchanged by positive rescaling.
-- **Euclidean distance.** √(Σ<sub>k</sub> (x<sub>k</sub> − y<sub>k</sub>)²). For binary films this is √|K<sub>x</sub> Δ K<sub>y</sub>|. Longer lists and larger count gaps increase it.
-- **Film sum.** s = a + b, then the other title that maximizes cos θ(s, z). A tag on both query films contributes 2 to s · z.
-- **Actor sum.** The same addition of count vectors. Cosine keeps the maximum. Euclidean distance keeps the minimum of ‖s − z‖₂.
-- **Reported angle.** θ = arccos(cos θ), shown as θ/π and in degrees. Frozen + The Expendables has cosine about 0.283, about 0.409π, about 74°.
+<ul>
+  <li><strong>Vocabulary.</strong> 8,086 distinct plot keywords from 5,043 films. Each film is a vertex of the unit hypercube in that dimension.</li>
+  <li><strong>Actor coordinate.</strong> The number of lead credits whose keyword list contains that tag. Actors with at most ten such credits are left out.</li>
+  <li><strong>Cosine.</strong> (x · y) / (‖x‖₂ ‖y‖₂). For binary films this is |K<sub>x</sub> ∩ K<sub>y</sub>| / √(|K<sub>x</sub>| |K<sub>y</sub>|). It is unchanged by positive rescaling.</li>
+  <li><strong>Euclidean distance.</strong> √(Σ<sub>k</sub> (x<sub>k</sub> − y<sub>k</sub>)²). For binary films this is √|K<sub>x</sub> Δ K<sub>y</sub>|. Longer lists and larger count gaps increase it.</li>
+  <li><strong>Film sum.</strong> s = a + b, then the other title that maximizes cos θ(s, z). A tag on both query films contributes 2 to s · z.</li>
+  <li><strong>Actor sum.</strong> The same addition of count vectors. Cosine keeps the maximum. Euclidean distance keeps the minimum of ‖s − z‖₂.</li>
+  <li><strong>Reported angle.</strong> θ = arccos(cos θ), shown as θ/π and in degrees. Frozen + The Expendables has cosine about 0.283, about 0.409π, about 74°.</li>
+</ul>
 
 <p class="sw-actions">
   <a class="sw-btn sw-btn-live" href="https://sdcastillo.shinyapps.io/imdb_addition/">Open the Shiny app</a>
